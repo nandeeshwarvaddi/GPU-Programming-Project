@@ -1,4 +1,4 @@
-# Tutorial-2: Single Source Shortest Path (SSSP) on GPU
+# Single Source Shortest Path (SSSP) on GPU
 
 ## 1. Project Overview
 
