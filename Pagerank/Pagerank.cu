@@ -1,28 +1,3 @@
-// ============================================================================
-//  GPU Programming Project - Group 14
-//  Parallel Implementation of PageRank on GPU (CUDA)
-//
-//  Workflow (as in the project abstract):
-//    Graph Input -> CSR Construction -> CPU Reference Implementation
-//    -> GPU Memory Transfer -> PageRank Initialization -> CUDA Parallelization
-//    -> Parallel Rank Computation -> Convergence Check -> GPU Result
-//    -> CPU/GPU Verification -> Performance Analysis
-//
-//  Formula (damping d = 0.85, N vertices):
-//    PR_new(v) = (1-d)/N + d * ( danglingSum/N + sum_{u -> v} PR_old(u)/outdeg(u) )
-//  danglingSum = total rank of vertices with no outgoing edges, spread evenly
-//  so that the ranks always sum to 1.
-//
-//  Graph storage: CSR over INCOMING edges
-//    in_row_ptr[v] .. in_row_ptr[v+1]-1  -> positions in in_col
-//    in_col[e]                           -> source vertex u of edge u -> v
-//  plus out_deg[u] for every vertex.
-//
-//  Build : nvcc -O3 -arch=sm_70 pagerank.cu -o pagerank
-//          (needs sm_60 or newer for atomicAdd on double; use the arch of your GPU)
-//  Run   : ./pagerank graph.txt            (edge list: "src dst" per line, '#' = comment)
-//          ./pagerank --random 1000000 8   (random graph: N vertices, avg out-degree 8)
-// ============================================================================
 
 #include <cstdio>
 #include <cstdlib>
@@ -37,14 +12,14 @@
 #include <algorithm>
 #include <cuda_runtime.h>
 
-#define CUDA_CHECK(call)                                                        \
-    do {                                                                        \
-        cudaError_t err__ = (call);                                             \
-        if (err__ != cudaSuccess) {                                             \
-            fprintf(stderr, "CUDA error: %s at %s:%d\n",                        \
-                    cudaGetErrorString(err__), __FILE__, __LINE__);             \
-            exit(EXIT_FAILURE);                                                 \
-        }                                                                       \
+#define CUDA_CHECK(call)                                                        
+    do {                                                                        
+        cudaError_t err__ = (call);                                             
+        if (err__ != cudaSuccess) {                                             
+            fprintf(stderr, "CUDA error: %s at %s:%d\n",                        
+                    cudaGetErrorString(err__), __FILE__, __LINE__);             
+            exit(EXIT_FAILURE);                                                 
+        }                                                                       
     } while (0)
 
 const double DAMPING  = 0.85;
@@ -81,9 +56,8 @@ static void load_edge_list(const char* path, std::vector<std::pair<int,int>>& ed
         edges.push_back({(int)u, (int)v});
         max_id = std::max(max_id, (int)std::max(u, v));
     }
-    n = max_id + 1;   // vertex ids 0..max_id (unused ids become dangling vertices)
+    n = max_id + 1; 
 }
-
 static void random_graph(int n, int avg_deg, std::vector<std::pair<int,int>>& edges)
 {
     std::mt19937 rng(42);   // fixed seed -> reproducible runs
@@ -98,10 +72,7 @@ static void random_graph(int n, int avg_deg, std::vector<std::pair<int,int>>& ed
         }
     }
 }
-
-
 // CSR construction (incoming edges)
-
 static Graph build_csr(int n, const std::vector<std::pair<int,int>>& edges)
 {
     Graph g;
@@ -121,10 +92,7 @@ static Graph build_csr(int n, const std::vector<std::pair<int,int>>& edges)
     for (const auto& e : edges) g.in_col[pos[e.second]++] = e.first;
     return g;
 }
-
-
 // CPU reference implementation (serial)
-
 static int cpu_pagerank(const Graph& g, std::vector<double>& pr, double& final_err)
 {
     const int n = g.n;
@@ -134,7 +102,6 @@ static int cpu_pagerank(const Graph& g, std::vector<double>& pr, double& final_e
     final_err = 0.0;
 
     while (iters < MAX_ITER) {
-        // contribution of every vertex + rank held by dangling vertices
         double dangling = 0.0;
         for (int u = 0; u < n; ++u) {
             if (g.out_deg[u] > 0) contrib[u] = pr[u] / g.out_deg[u];
@@ -142,7 +109,7 @@ static int cpu_pagerank(const Graph& g, std::vector<double>& pr, double& final_e
         }
         const double base = (1.0 - DAMPING) / n + DAMPING * dangling / n;
 
-        // new rank from incoming neighbours
+    
         double err = 0.0;
         for (int v = 0; v < n; ++v) {
             double sum = 0.0;
@@ -158,19 +125,12 @@ static int cpu_pagerank(const Graph& g, std::vector<double>& pr, double& final_e
     }
     return iters;
 }
-
-
-// CUDA kernels  (one thread = one vertex)
-
-
 // PageRank initialization: PR(v) = 1/N
 __global__ void init_kernel(double* pr, int n)
 {
     int v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v < n) pr[v] = 1.0 / n;
 }
-
-// contrib[u] = PR(u)/outdeg(u); dangling rank summed with a block reduction
 __global__ void contrib_kernel(const double* __restrict__ pr,
                                const int*    __restrict__ out_deg,
                                double*       __restrict__ contrib,
@@ -196,11 +156,6 @@ __global__ void contrib_kernel(const double* __restrict__ pr,
     }
     if (tid == 0 && sdata[0] != 0.0) atomicAdd(dangling_sum, sdata[0]);
 }
-
-// Parallel rank computation: each thread walks the incoming CSR edges of its
-// vertex, reads only the previous iteration's values (pr_old / contrib) and
-// writes into pr_new  -> two buffers keep the iterations synchronous.
-// The L1 difference is reduced per block for the convergence check.
 __global__ void update_kernel(const int*    __restrict__ in_row_ptr,
                               const int*    __restrict__ in_col,
                               const double* __restrict__ contrib,
@@ -235,15 +190,12 @@ __global__ void update_kernel(const int*    __restrict__ in_row_ptr,
     }
     if (tid == 0 && sdata[0] != 0.0) atomicAdd(l1_err, sdata[0]);
 }
-
-
 // GPU driver
-
 struct GpuResult {
     int    iters;
     double final_err;
-    double kernel_ms;   // time spent inside the kernels only
-    double e2e_ms;      // malloc + H2D + all iterations + D2H + free
+    double kernel_ms;   
+    double e2e_ms;      
 };
 
 static GpuResult gpu_pagerank(const Graph& g, int tpb, std::vector<double>& pr_out)
@@ -258,8 +210,6 @@ static GpuResult gpu_pagerank(const Graph& g, int tpb, std::vector<double>& pr_o
     CUDA_CHECK(cudaEventCreate(&k1));
 
     auto t_start = std::chrono::high_resolution_clock::now();
-
-    // ---- GPU memory allocation + transfer ----
     int *d_row_ptr, *d_col, *d_out_deg;
     double *d_pr_a, *d_pr_b, *d_contrib, *d_dangling, *d_err;
     CUDA_CHECK(cudaMalloc(&d_row_ptr, (n + 1) * sizeof(int)));
@@ -276,7 +226,6 @@ static GpuResult gpu_pagerank(const Graph& g, int tpb, std::vector<double>& pr_o
         CUDA_CHECK(cudaMemcpy(d_col, g.in_col.data(), m * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_out_deg, g.out_deg.data(), n * sizeof(int), cudaMemcpyHostToDevice));
 
-    // ---- PageRank initialization ----
     float ms = 0.0f;
     CUDA_CHECK(cudaEventRecord(k0));
     init_kernel<<<blocks, tpb>>>(d_pr_a, n);
@@ -291,7 +240,6 @@ static GpuResult gpu_pagerank(const Graph& g, int tpb, std::vector<double>& pr_o
     double h_err = 0.0;
     int iters = 0;
 
-    // ---- iterate until convergence ----
     while (iters < MAX_ITER) {
         CUDA_CHECK(cudaMemset(d_dangling, 0, sizeof(double)));
         CUDA_CHECK(cudaMemset(d_err,      0, sizeof(double)));
@@ -303,17 +251,15 @@ static GpuResult gpu_pagerank(const Graph& g, int tpb, std::vector<double>& pr_o
         CUDA_CHECK(cudaEventRecord(k1));
         CUDA_CHECK(cudaGetLastError());
 
-        // convergence check: copy back the single L1 error value
         CUDA_CHECK(cudaMemcpy(&h_err, d_err, sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaEventElapsedTime(&ms, k0, k1));
         r.kernel_ms += ms;
 
-        std::swap(d_old, d_new);   // swap the two PageRank buffers
+        std::swap(d_old, d_new);   
         ++iters;
         if (h_err < TOL) break;
     }
 
-    // ---- GPU result back to host ----
     pr_out.resize(n);
     CUDA_CHECK(cudaMemcpy(pr_out.data(), d_old, n * sizeof(double), cudaMemcpyDeviceToHost));
 
@@ -331,8 +277,6 @@ static GpuResult gpu_pagerank(const Graph& g, int tpb, std::vector<double>& pr_o
     CUDA_CHECK(cudaEventDestroy(k1));
     return r;
 }
-
-
 // CPU/GPU verification
 
 static bool verify(const std::vector<double>& cpu, const std::vector<double>& gpu, double& max_diff)
@@ -353,10 +297,6 @@ static void print_top(const std::vector<double>& pr, int k)
     printf("Top %d vertices by PageRank:\n", k);
     for (int i = 0; i < k; ++i) printf("  %2d. vertex %-10d  %.8f\n", i + 1, idx[i], pr[idx[i]]);
 }
-
-
-// main: input -> CSR -> CPU reference -> GPU (64..1024 threads) -> verify -> report
-
 int main(int argc, char** argv)
 {
     std::vector<std::pair<int,int>> edges;
@@ -377,8 +317,6 @@ int main(int argc, char** argv)
         random_graph(n, 8, edges);
     }
     if (n <= 0) { fprintf(stderr, "Empty graph\n"); return EXIT_FAILURE; }
-
-    // CSR construction
     Graph g = build_csr(n, edges);
     edges.clear(); edges.shrink_to_fit();
     int dangling = 0;
@@ -388,9 +326,7 @@ int main(int argc, char** argv)
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     printf("GPU: %s (SMs: %d)\n", prop.name, prop.multiProcessorCount);
-    CUDA_CHECK(cudaFree(0));   // create the CUDA context before timing
-
-    // CPU reference
+    CUDA_CHECK(cudaFree(0));  
     std::vector<double> cpu_pr;
     double cpu_err;
     auto c0 = std::chrono::high_resolution_clock::now();
@@ -399,12 +335,9 @@ int main(int argc, char** argv)
     double cpu_ms = std::chrono::duration<double, std::milli>(c1 - c0).count();
     printf("\nCPU: %d iterations, final L1 error = %.3e, time = %.3f ms\n",
            cpu_iters, cpu_err, cpu_ms);
-
-    // GPU runs for 64..1024 threads per block
     const int tpbs[] = {64, 128, 256, 512, 1024};
     std::vector<double> gpu_pr;
     bool all_ok = true;
-
     printf("\n%-8s %-6s %-14s %-14s %-12s %-12s %-12s %-8s\n",
            "Threads", "Iters", "Kernel(ms)", "E2E(ms)", "Speedup(K)", "Speedup(E2E)", "MaxDiff", "Check");
     printf("--------------------------------------------------------------------------------------------\n");
@@ -427,6 +360,5 @@ int main(int argc, char** argv)
     double sum = 0.0;
     for (double x : gpu_pr) sum += x;
     printf("\nSum of GPU ranks = %.8f (should be ~1.0)\n", sum);
-
     return all_ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

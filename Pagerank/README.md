@@ -159,7 +159,3 @@ The program displays:
 - Speedup for different thread configurations.
 - CPU/GPU verification status.
 - Top 5 vertices based on PageRank values.
-
-## 14. Author
-
-Group 14 – GPU Programming Project
